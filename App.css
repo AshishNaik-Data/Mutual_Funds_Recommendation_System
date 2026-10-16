@@ -1,0 +1,200 @@
+/* Background with modern soft gradient */
+@import "react-toastify/dist/ReactToastify.css";
+
+body {
+  font-family: 'Segoe UI', sans-serif;
+  background: linear-gradient(135deg, #858d98, #132231);
+  margin: 0;
+  padding: 0;
+  color: #2c3e50;
+  min-height: 100vh;
+}
+
+/* Main Container */
+.container {
+  max-width: 900px;
+  margin: 4rem auto;
+  padding: 2.5rem 3rem;
+  background: #ffffff;
+  border-radius: 14px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.07);
+}
+
+/* Heading */
+h1 {
+  text-align: center;
+  font-size: 2rem;
+  color: #1e4f91;
+  margin-bottom: 2.5rem;
+}
+
+/* Form Styling */
+.form {
+  display: flex;
+  flex-direction: column;
+  gap: 1.75rem;
+}
+
+label {
+  font-size: 1rem;
+  font-weight: 600;
+  color: #2f2f2f;
+  display: flex;
+  flex-direction: column;
+}
+
+/* Inputs */
+textarea,
+select {
+  margin-top: 0.5rem;
+  padding: 0.9rem;
+  font-size: 1rem;
+  border: 1px solid #d6dbe0;
+  border-radius: 10px;
+  background-color: #fbfbfd;
+  transition: border-color 0.3s ease;
+}
+
+textarea:focus,
+select:focus {
+  border-color: #1e4f91;
+  outline: none;
+}
+
+/* Character Count */
+.char-count {
+  text-align: right;
+  font-size: 0.85rem;
+  color: #6c757d;
+  margin-top: 0.25rem;
+}
+
+/* Error Messages */
+.error {
+  color: #c62828;
+  font-size: 0.9rem;
+  font-weight: 500;
+  margin-top: 0.35rem;
+}
+
+/* Button */
+button {
+  padding: 0.9rem;
+  background-color: #1e4f91;
+  color: #fff;
+  border: none;
+  border-radius: 10px;
+  font-weight: 600;
+  font-size: 1rem;
+  cursor: pointer;
+  transition: background-color 0.3s ease;
+}
+
+button:hover {
+  background-color: #153e75;
+}
+
+/* Loading */
+.loading {
+  text-align: center;
+  font-size: 1rem;
+  margin-top: 1.5rem;
+  color: #555;
+}
+
+/* Results Section */
+.results {
+  margin-top: 2.5rem;
+}
+
+.fund-card {
+  background-color: #fdfefe;
+  border: 1px solid #e2e6ea;
+  border-radius: 12px;
+  padding: 1.5rem;
+  margin-bottom: 1.5rem;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.03);
+  transition: transform 0.25s ease;
+}
+
+.fund-card:hover {
+  transform: translateY(-4px);
+}
+
+.fund-card h3 {
+  color: #1e4f91;
+  margin-bottom: 0.75rem;
+}
+
+.fund-card p {
+  margin: 0.3rem 0;
+  font-size: 0.95rem;
+  line-height: 1.5;
+}
+
+/* Backend Info */
+.backend-url {
+  text-align: center;
+  font-size: 0.85rem;
+  color: #a1a5aa;
+  margin-top: 3rem;
+}
+.container,
+.fund-card {
+  animation: fadeIn 0.6s ease;
+}
+
+@keyframes fadeIn {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+/* Toggle Switch Styling */
+.toggle-container {
+  display: flex;
+  align-items: center;
+  margin-top: 1.5rem;
+  font-size: 1rem;
+}
+
+.switch {
+  position: relative;
+  display: inline-block;
+  width: 50px;
+  height: 24px;
+  margin-right: 10px;
+}
+
+.switch input {
+  opacity: 0;
+  width: 0;
+  height: 0;
+}
+
+.slider {
+  position: absolute;
+  cursor: pointer;
+  top: 0; left: 0; right: 0; bottom: 0;
+  background-color: #ccc;
+  transition: 0.4s;
+  border-radius: 24px;
+}
+
+.slider:before {
+  position: absolute;
+  content: "";
+  height: 18px;
+  width: 18px;
+  left: 3px;
+  bottom: 3px;
+  background-color: white;
+  transition: 0.4s;
+  border-radius: 50%;
+}
+
+input:checked + .slider {
+  background-color: #0d3b66;
+}
+
+input:checked + .slider:before {
+  transform: translateX(26px);
+}
