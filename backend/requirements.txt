@@ -1,0 +1,23 @@
+# LangChain RAG pipeline
+langchain-core>=1.0,<2
+langchain-community>=0.4,<0.5
+langchain-huggingface>=1.0,<2
+faiss-cpu>=1.8
+rank-bm25>=0.2.2
+sentence-transformers>=3.0
+
+# Data + API
+pandas>=2.0
+numpy>=1.26
+requests>=2.31
+fastapi>=0.110
+uvicorn[standard]>=0.29
+
+# Local LLM (Phi-2 + LoRA adapter). torch is preinstalled on Colab; elsewhere install it first.
+transformers>=4.46
+peft>=0.12
+accelerate>=0.33
+packaging
+
+# Optional: MF_LLM_BACKEND=chat (any LangChain chat model) also needs
+#   pip install langchain  plus the provider package, e.g. langchain-openai or langchain-anthropic

@@ -1,5 +1,4 @@
 /* Background with modern soft gradient */
-@import "react-toastify/dist/ReactToastify.css";
 
 body {
   font-family: 'Segoe UI', sans-serif;
@@ -90,8 +89,13 @@ button {
   transition: background-color 0.3s ease;
 }
 
-button:hover {
+button:hover:not(:disabled) {
   background-color: #153e75;
+}
+
+button:disabled {
+  opacity: 0.7;
+  cursor: wait;
 }
 
 /* Loading */
@@ -197,4 +201,37 @@ input:checked + .slider {
 
 input:checked + .slider:before {
   transform: translateX(26px);
+}
+
+/* Results extras */
+.results-title {
+  color: #0d3b66;
+  margin-bottom: 1rem;
+}
+
+.notice {
+  background: #fff8e1;
+  border-left: 4px solid #f0b429;
+  padding: 0.75rem 1rem;
+  border-radius: 6px;
+  font-size: 0.95rem;
+}
+
+.query-info {
+  color: #6c757d;
+  font-size: 0.9rem;
+  font-style: italic;
+}
+
+.disclaimer {
+  color: #6c757d;
+  font-size: 0.85rem;
+  text-align: center;
+}
+
+@media (max-width: 640px) {
+  .container {
+    margin: 1rem;
+    padding: 1.5rem 1rem;
+  }
 }
