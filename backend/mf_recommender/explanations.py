@@ -12,6 +12,7 @@ import math
 import re
 
 from .categories import profile_for, short_name, with_article
+from .data import RISK_BANDS, RISK_LABELS
 
 _LABELS = {"1yr": "1-year", "3yr": "3-year", "5yr": "5-year"}
 
@@ -69,7 +70,30 @@ def _beats(share: float, first: bool, peers: int) -> str:
     return f"beats {pct(share)}% of {whom}"
 
 
-def describe_fund(fund: dict, goal: str = "", horizon_years: float | None = None) -> str:
+def _risk_step(fund: dict) -> int | None:
+    step = fund.get("risk_step")
+    if step is None or (isinstance(step, float) and math.isnan(step)):
+        return None
+    return int(step)
+
+
+def risk_fit_text(fund: dict, requested_risk: str | None) -> str:
+    """How the fund's riskometer level compares with the band the investor picked."""
+    step = _risk_step(fund)
+    if not requested_risk or requested_risk not in RISK_BANDS or step is None:
+        return "no risk preference given"
+    lo, hi = RISK_BANDS[requested_risk]
+    band = f"which covers {RISK_LABELS[lo]} and {RISK_LABELS[hi]}"
+    if step < lo:
+        return f"lower than the {requested_risk} risk you asked for, {band}"
+    if step > hi:
+        return f"higher than the {requested_risk} risk you asked for, {band}"
+    return f"matches the {requested_risk} risk you asked for"
+
+
+def describe_fund(
+    fund: dict, goal: str = "", horizon_years: float | None = None, requested_risk: str | None = None
+) -> str:
     profile = profile_for(fund["category"])
     peers = int(fund.get("peer_count") or 0)
     kind = short_name(fund["category"])
@@ -78,6 +102,9 @@ def describe_fund(fund: dict, goal: str = "", horizon_years: float | None = None
     sentences = [
         f"{fund['scheme_name']} is {with_article(noun)}{asset} rated {fund['risk_label']} risk on the riskometer."
     ]
+    fit = risk_fit_text(fund, requested_risk)
+    if fit.startswith(("lower", "higher")):
+        sentences.append(f"That is {fit.split(', which')[0]}.")
 
     clauses = []
     for key in _return_order(horizon_years):
@@ -128,11 +155,15 @@ def describe_fund(fund: dict, goal: str = "", horizon_years: float | None = None
     return " ".join(sentences)
 
 
-def prompt_inputs(fund: dict, goal: str, horizon_years: float | None) -> dict[str, str]:
+def prompt_inputs(
+    fund: dict, goal: str, horizon_years: float | None, requested_risk: str | None = None
+) -> dict[str, str]:
     """Variables for prompts.EXPLAIN_TEMPLATE (also used to build the training set)."""
     nav = fund.get("nav")
     return {
         "goal": goal.strip(),
+        "requested_risk": requested_risk or "no preference",
+        "risk_fit": risk_fit_text(fund, requested_risk),
         "scheme_name": fund["scheme_name"],
         "category": fund["category"],
         "risk_label": fund["risk_label"],
@@ -151,6 +182,10 @@ _PERCENT = re.compile(r"(-?\d+(?:\.\d+)?)\s*%")
 _NUMBER = re.compile(r"-?\d+(?:\.\d+)?")
 
 
+def cites_a_percentage(text: str) -> bool:
+    return bool(_PERCENT.search(text))
+
+
 def is_grounded(text: str, inputs: dict[str, str]) -> bool:
     """True if every percentage in ``text`` appears in the facts given to the model."""
     allowed = {float(n) for value in inputs.values() for n in _NUMBER.findall(str(value))}
@@ -159,3 +194,54 @@ def is_grounded(text: str, inputs: dict[str, str]) -> bool:
         if not any(abs(number - a) <= 0.051 for a in allowed):
             return False
     return True
+
+
+# Qualitative claims a model can get wrong without citing a number ("low expense ratio" for a
+# fund that is pricier than most of its peers), checked against the peer comparison.
+_CHEAP = re.compile(
+    r"\b(?:low|lower|lowest|cheap|cheaper|cheapest|competitive|attractive|reasonable|minimal|modest|economical)"
+    r"\s+(?:expense|expenses|cost|costs|fee|fees|charges)\b"
+    r"|\b(?:cost[- ]effective|cost[- ]efficient|inexpensive|low[- ]cost|budget[- ]friendly)\b"
+    r"|\bexpense ratio\b(?:[^.!?]|\.(?=\d)){0,40}?\b(?:is|remains|looks|seems)\s+"
+    r"(?:very\s+|quite\s+|relatively\s+|fairly\s+)?(?:low|competitive|reasonable|attractive|modest)\b",
+    re.I,
+)
+_PRICEY = re.compile(
+    r"\b(?:high|higher|highest|steep|hefty)\s+(?:expense|expenses|cost|costs|fee|fees|charges)\b"
+    r"|\b(?:expensive|costly|pricey)\b",
+    re.I,
+)
+_STRONG_RETURNS = re.compile(
+    r"\b(?:strong|high|higher|impressive|excellent|superior|robust|solid|outstanding|stellar|exceptional|"
+    r"above[- ]average|healthy|good|great|attractive)\s+(?:[\w-]+\s+){0,2}?(?:returns?|performance|track record)\b"
+    r"|\bout-?perform(?:s|ed|ing|ance)?\b|\b(?:top|best)[- ]perform(?:ing|er|ers)\b",
+    re.I,
+)
+
+
+def _number(value: object) -> float | None:
+    if value is None or (isinstance(value, float) and math.isnan(value)):
+        return None
+    return float(value)
+
+
+def contradictions(text: str, fund: dict) -> list[str]:
+    """Claims in ``text`` that the fund's peer comparison says are false."""
+    if not int(fund.get("peer_count") or 0):
+        return []
+    problems = []
+    cost = _number(fund.get("expense_beats"))
+    if cost is not None and _number(fund.get("expense_ratio")) is not None:
+        if cost < 0.5 and _CHEAP.search(text):
+            problems.append(f"calls the cost low, but the expense ratio is lower than only {pct(cost)}% of peers")
+        if cost > 0.5 and _PRICEY.search(text):
+            problems.append(f"calls the cost high, but the expense ratio is lower than {pct(cost)}% of peers")
+    shares = [
+        _number(fund.get(f"returns_{k}_beats"))
+        for k in ("1yr", "3yr", "5yr")
+        if _number(fund.get(f"returns_{k}")) is not None
+    ]
+    shares = [s for s in shares if s is not None]
+    if shares and max(shares) < 0.5 and _STRONG_RETURNS.search(text):
+        problems.append(f"praises the returns, but they beat at most {pct(max(shares))}% of peers in any period")
+    return problems

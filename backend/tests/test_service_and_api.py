@@ -1,10 +1,12 @@
+from datetime import date, timedelta
+
 import pytest
 from fastapi.testclient import TestClient
 from langchain_core.language_models.fake import FakeListLLM
 
 from mf_recommender.api import create_app
 from mf_recommender.nav import NavClient, NavQuote
-from mf_recommender.service import UnknownCategoryError
+from mf_recommender.service import UnknownCategoryError, nav_age_days
 
 # Keys the existing React frontend reads.
 LEGACY_KEYS = {"scheme_name", "NAV", "returns_1yr", "returns_3yr", "returns_5yr", "expense_ratio", "risk_level", "explanation"}
@@ -49,13 +51,32 @@ def test_llm_rewrite_is_fused_with_original_goal(make_service):
     assert any(f["category"] == "ELSS Mutual Funds" for f in result.funds)
 
 
-def test_live_nav_overrides_dataset_nav(make_service):
+def _fixed_nav(nav, nav_date):
     class FakeNav(NavClient):
         def latest(self, scheme_code):
-            return NavQuote(nav=123.45, date="2026-10-16")
+            return NavQuote(nav=nav, date=nav_date)
 
-    result = make_service(nav_client=FakeNav()).recommend("long-term growth", "Index Funds", "High")
-    assert all(f["NAV"] == 123.45 and f["nav_source"] == "live" and f["nav_date"] == "2026-10-16" for f in result.funds)
+    return FakeNav()
+
+
+def test_live_nav_overrides_dataset_nav(make_service):
+    today = date.today().isoformat()
+    result = make_service(nav_client=_fixed_nav(123.45, today)).recommend("long-term growth", "Index Funds", "High")
+    assert all(f["NAV"] == 123.45 and f["nav_source"] == "live" and f["nav_date"] == today for f in result.funds)
+
+
+def test_old_nav_is_flagged_stale_not_live(make_service):
+    # Kotak Banking and PSU's scheme code returned a NAV dated 2013-08-13, shown as "live".
+    result = make_service(nav_client=_fixed_nav(10.78, "2013-08-13")).recommend("short term", "Index Funds", "High")
+    assert {f["nav_source"] for f in result.funds} == {"stale"}
+    week_old = (date.today() - timedelta(days=6)).isoformat()  # e.g. across a long holiday
+    result = make_service(nav_client=_fixed_nav(10.78, week_old)).recommend("short term", "Index Funds", "High")
+    assert {f["nav_source"] for f in result.funds} == {"live"}
+
+
+def test_nav_age_days():
+    assert nav_age_days("2026-10-10", date(2026, 10, 20)) == 10
+    assert nav_age_days(None) is None and nav_age_days("not a date") is None
 
 
 def test_nav_client_parses_and_caches():
@@ -95,7 +116,9 @@ def client(service):
 
 
 def test_api_health_and_categories(client):
-    assert client.get("/health").json()["status"] == "ok"
+    health = client.get("/health").json()
+    assert health["status"] == "ok"
+    assert {"llm_backend", "base_model", "adapter", "fine_tuned"} <= set(health)
     body = client.get("/categories").json()
     assert "Large Cap Mutual Funds" in body["categories"]
     assert body["risk_levels"] == ["Low", "Medium", "High"]

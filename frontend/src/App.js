@@ -25,6 +25,17 @@ const FALLBACK_CATEGORIES = [
   "Ultra Short Duration Funds", "Value Funds",
 ];
 
+// What writes the explanations, from GET /health.
+function modelText(health) {
+  if (!health || !health.llm_backend) return "";
+  if (health.llm_backend === "none") return "Explanations: from fund data (no language model)";
+  const name = String(health.base_model || health.llm_backend).split("/").pop();
+  if (health.llm_backend === "hf") {
+    return health.fine_tuned ? `Model: ${name} + LoRA fine-tune` : `Model: ${name} (not fine-tuned)`;
+  }
+  return `Model: ${name}`;
+}
+
 async function errorMessage(res) {
   try {
     const body = await res.json();
@@ -47,9 +58,18 @@ function App() {
   const [error, setError] = useState("");
   const [fieldErrors, setFieldErrors] = useState({});
   const [loading, setLoading] = useState(false);
+  const [health, setHealth] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
+    fetch(`${API_URL}/health`, { headers: HEADERS })
+      .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
+      .then((data) => {
+        if (!cancelled) setHealth(data);
+      })
+      .catch(() => {
+        /* footer just omits the model */
+      });
     fetch(`${API_URL}/categories`, { headers: HEADERS })
       .then((res) => (res.ok ? res.json() : Promise.reject(res.status)))
       .then((data) => {
@@ -167,7 +187,10 @@ function App() {
         </div>
       )}
 
-      <p className="backend-url">Backend: {API_URL}</p>
+      <p className="backend-url">
+        Backend: {API_URL}
+        {modelText(health) && <span className="model-info"> · {modelText(health)}</span>}
+      </p>
     </div>
   );
 }

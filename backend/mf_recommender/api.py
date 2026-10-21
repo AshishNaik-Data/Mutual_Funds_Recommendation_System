@@ -10,6 +10,7 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from .config import Settings
 from .data import RISK_BANDS
+from .llm import describe_model
 from .schemas import CategoriesResponse, RecommendRequest, RecommendResponse
 from .service import RecommenderService, UnknownCategoryError
 
@@ -48,8 +49,9 @@ def create_app(settings: Settings | None = None, service: RecommenderService | N
         return {
             "status": "ok",
             "funds": len(svc.funds),
-            "llm_backend": settings.llm_backend if svc.llm is not None else "none",
-            "embedding_model": settings.embedding_model,
+            # llm_backend, base_model, adapter, fine_tuned: what writes the explanations
+            **describe_model(svc.settings, svc.llm is not None),
+            "embedding_model": svc.settings.embedding_model,
             "live_nav": svc.nav_client is not None,
         }
 

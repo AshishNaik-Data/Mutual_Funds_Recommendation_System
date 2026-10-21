@@ -6,10 +6,11 @@ from mf_recommender.chains import (
     build_rewrite_chain,
     clean_generation,
     clean_rewrite,
+    explanation_problem,
     is_degenerate,
     is_usable_explanation,
 )
-from mf_recommender.explanations import describe_fund, is_grounded, prompt_inputs
+from mf_recommender.explanations import cites_a_percentage, describe_fund, is_grounded, prompt_inputs
 
 
 @pytest.fixture
@@ -62,7 +63,8 @@ def test_is_degenerate():
 @pytest.mark.parametrize(
     "text, ok",
     [
-        ("This fund has a low expense ratio and strong long-term returns for its category.", True),
+        ("This fund has a low expense ratio and a 12.4% five-year return for its category.", True),
+        ("This fund has a low expense ratio and strong long-term returns for its category.", False),  # no figures
         ("ofmatofargeofrimarimarimarimariofmatofargeofrimarimarimarimari", False),  # run-together junk
         ("Good fund.", False),  # too short
         ("This fund returned 87.3% every single year, guaranteed by the fund house.", False),  # invented number
@@ -114,3 +116,88 @@ def test_rewrite_chain():
     chain = build_rewrite_chain(FakeListLLM(responses=[" large cap equity fund for long-term growth\nUser goal: x"]))
     assert chain.invoke("I want my money to grow") == "large cap equity fund for long-term growth"
     assert build_rewrite_chain(None) is None
+
+
+# --- checks added after the first Phi-3 run (Banking and PSU, "short term", High risk) ---------
+
+
+@pytest.fixture
+def kotak(funds):
+    """Expense ratio 0.37%: lower than only 13% of Banking and PSU peers."""
+    return funds[funds["scheme_name"] == "Kotak Banking and PSU Debt Fund"].iloc[0].to_dict()
+
+
+def test_gate_rejects_low_cost_claim_for_a_pricey_fund(kotak):
+    facts = prompt_inputs(kotak, "I want a short term investment", 1.0, "High")
+    # What untuned Phi-3 wrote for this fund, plus a real figure so only the claim is wrong.
+    text = ("This could suit you given its 7.5% five-year return and low expense ratio compared to peers.")
+    assert is_grounded(text, facts)
+    assert "expense ratio is lower than only 13% of peers" in explanation_problem(text, facts, kotak)
+    honest = "Its 5-year return of 7.5% beats 93% of peers, but at 0.37% its expense ratio is lower than 13% of peers."
+    assert explanation_problem(honest, facts, kotak) is None
+
+
+@pytest.mark.parametrize(
+    "claim",
+    ["a cost-effective choice", "its expense ratio of 0.37% is relatively low", "the lowest fees in its class"],
+)
+def test_cheap_claims_are_recognised(kotak, claim):
+    facts = prompt_inputs(kotak, "", None)
+    assert explanation_problem(f"With a 7.5% five-year return, it is {claim}.", facts, kotak)
+
+
+def test_gate_rejects_praise_for_below_median_returns(funds):
+    weak = funds[(funds[["returns_1yr_beats", "returns_3yr_beats", "returns_5yr_beats"]].max(axis=1) < 0.3)]
+    fund = weak.iloc[0].to_dict()
+    facts = prompt_inputs(fund, "", None)
+    text = f"It has delivered strong returns, {facts['returns_5yr']}% over five years."
+    assert "praises the returns" in explanation_problem(text, facts, fund)
+
+
+def test_template_explanations_pass_the_gate(funds):
+    for fund in funds.sample(80, random_state=0).to_dict("records"):
+        for risk in (None, "Low", "High"):
+            facts = prompt_inputs(fund, "grow my money for 5 years", 5.0, risk)
+            text = describe_fund(fund, "grow my money for 5 years", 5.0, risk)
+            if cites_a_percentage(text):
+                assert explanation_problem(text, facts, fund) is None, text
+
+
+def test_prompt_states_the_risk_the_investor_chose(kotak):
+    from mf_recommender.prompts import EXPLAIN_PROMPT
+
+    prompt = EXPLAIN_PROMPT.format(**prompt_inputs(kotak, "I want a short term investment", 1.0, "High"))
+    assert "Risk I asked for: High" in prompt
+    assert "Risk Level: Moderate (lower than the High risk you asked for, which covers High and Very High)" in prompt
+    assert "with 'Moderate' risk" not in prompt
+    assert "Risk I asked for: no preference" in EXPLAIN_PROMPT.format(**prompt_inputs(kotak, "x", None))
+
+
+def test_template_mentions_a_risk_mismatch(kotak):
+    assert "That is lower than the High risk you asked for." in describe_fund(kotak, "", 1.0, "High")
+    assert "you asked for" not in describe_fund(kotak, "", 1.0, "Medium")
+    assert "you asked for" not in describe_fund(kotak, "", 1.0, None)
+
+
+def test_explain_chain_passes_risk_to_the_prompt(kotak):
+    seen = []
+
+    class Recorder(FakeListLLM):
+        def _call(self, prompt, *args, **kwargs):
+            seen.append(prompt)
+            return super()._call(prompt, *args, **kwargs)
+
+    out = build_explain_chain(Recorder(responses=["It suits you given its low expense ratio and 7.5% return."])).invoke(
+        {"fund": kotak, "goal": "short term", "horizon_years": 1.0, "risk": "High"}
+    )
+    assert "Risk I asked for: High" in seen[0]
+    assert out["source"] == "template"  # the low-cost claim is false for this fund
+    assert "lower than the High risk you asked for" in out["text"]
+
+
+def test_rewrite_prompt_steers_short_horizons_away_from_equity():
+    from mf_recommender.prompts import REWRITE_PROMPT
+
+    text = REWRITE_PROMPT.format(goal="I want a short term investment")
+    assert "under 3 years means debt, liquid or money market funds, not equity" in text
+    assert text.rstrip().endswith("Investor goal: I want a short term investment\nSearch query:")

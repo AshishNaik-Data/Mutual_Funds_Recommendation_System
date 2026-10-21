@@ -13,7 +13,7 @@ requests>=2.31
 fastapi>=0.110
 uvicorn[standard]>=0.29
 
-# Local LLM (Phi-2 + LoRA adapter). torch is preinstalled on Colab; elsewhere install it first.
+# Local LLM (Phi-3-mini + LoRA adapter). torch is preinstalled on Colab; elsewhere install it first.
 transformers>=4.46
 peft>=0.12
 accelerate>=0.33

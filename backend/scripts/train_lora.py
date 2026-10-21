@@ -1,9 +1,18 @@
-"""Fine-tune a causal LM (default: microsoft/phi-2) with LoRA to explain fund recommendations.
+"""Fine-tune Phi-3-mini (or any causal LM) with LoRA to explain fund recommendations.
 
     cd backend
-    python scripts/train_lora.py            # saves to artifacts/fine_tuned_phi2_v2, used automatically
+    python scripts/train_lora.py     # Phi-3-mini; saves to artifacts/lora-phi-3-mini-4k-instruct
 
-Fixes over the notebook's training cell:
+The base model comes from --base-model, else MF_BASE_MODEL, else microsoft/Phi-3-mini-4k-instruct.
+The adapter is saved under artifacts/ and the API picks it up automatically (only for the
+same base model). Defaults fit a free Colab T4: batch 2 x 8 accumulation steps, gradient
+checkpointing on, float16.
+
+For chat models such as Phi-3-mini each example is written in the model's own chat format
+(<|user|> prompt <|end|> <|assistant|> answer <|end|>), exactly as the API will prompt it,
+and the LoRA layers are chosen for the architecture (Phi-3: qkv_proj, o_proj).
+
+Fixes over the original notebook's training cell:
   * Loss only on the answer. The notebook trained on prompt + answer, so most of the
     gradient went into memorising the prompt layout.
   * The answer ends with an EOS token that is *not* masked out. The notebook used
@@ -31,8 +40,15 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))  # make mf_recommender importable
 
 from mf_recommender.categories import profile_for  # noqa: E402
-from mf_recommender.config import DEFAULT_ADAPTER_OUTPUT, Settings  # noqa: E402
+from mf_recommender.config import Settings, default_adapter_dir  # noqa: E402
+from mf_recommender.data import RISK_BANDS, risk_band_for_step  # noqa: E402
 from mf_recommender.explanations import describe_fund, prompt_inputs  # noqa: E402
+from mf_recommender.model_utils import (  # noqa: E402
+    has_chat_template,
+    lora_target_modules,
+    to_chat_example,
+    to_chat_prompt,
+)
 from mf_recommender.prompts import EXPLAIN_TEMPLATE  # noqa: E402
 
 GOALS = {
@@ -73,9 +89,22 @@ def sample_goal(rng: random.Random, group: str) -> tuple[str, float]:
     return template.format(y=n), float(n)
 
 
+def sample_requested_risk(rng: random.Random, fund: dict, mismatch_rate: float) -> str | None:
+    """The risk the investor picked in the UI. Usually the fund's own band (the API filters
+    by it); sometimes none; sometimes another band, as when no fund in the chosen category
+    has the requested risk and the API shows the closest ones."""
+    own = risk_band_for_step(fund["risk_step"])
+    roll = rng.random()
+    if roll < 0.15:
+        return None
+    if roll < 0.15 + mismatch_rate:
+        return rng.choice([b for b in RISK_BANDS if b != own])
+    return own
+
+
 def build_examples(funds, *, per_fund: int, mismatch_rate: float, seed: int) -> list[dict]:
-    """Prompt/response pairs. A share of goals deliberately mismatch the category's
-    horizon so the model also learns to say when a fund is *not* a good fit."""
+    """Prompt/response pairs. A share of goals (and risk choices) deliberately mismatch the
+    fund so the model also learns to say when a fund is *not* a good fit."""
     rng = random.Random(seed)
     from mf_recommender.ranking import parse_horizon_years
 
@@ -87,13 +116,14 @@ def build_examples(funds, *, per_fund: int, mismatch_rate: float, seed: int) -> 
             if rng.random() < mismatch_rate:
                 group = rng.choice([g for g in GOALS if g != own])
             goal, _ = sample_goal(rng, group)
+            risk = sample_requested_risk(rng, fund, mismatch_rate)
             # Use the same parser as the API so training and inference see identical inputs.
             horizon = parse_horizon_years(goal)
             examples.append(
                 {
                     "scheme_code": int(fund["scheme_code"]),
-                    "prompt": EXPLAIN_TEMPLATE.format(**prompt_inputs(fund, goal, horizon)),
-                    "response": describe_fund(fund, goal, horizon),
+                    "prompt": EXPLAIN_TEMPLATE.format(**prompt_inputs(fund, goal, horizon, risk)),
+                    "response": describe_fund(fund, goal, horizon, risk),
                 }
             )
     return examples
@@ -109,9 +139,24 @@ def split_by_fund(examples: list[dict], eval_fraction: float, seed: int) -> tupl
 
 
 def tokenize_example(example: dict, tokenizer, max_length: int) -> dict | None:
-    prompt_ids = tokenizer(example["prompt"], add_special_tokens=False)["input_ids"]
-    answer_ids = tokenizer(" " + example["response"], add_special_tokens=False)["input_ids"]
-    answer_ids = answer_ids + [tokenizer.eos_token_id]
+    """input_ids / labels for one example; labels = -100 (ignored) on the prompt, so the
+    loss is on the answer and its end-of-turn token only."""
+    if has_chat_template(tokenizer):
+        # Chat model: tokenize the whole conversation once and mask the prompt part, which
+        # ends with '<|assistant|>\n'. Tokenized exactly as the API's pipeline will (BOS included).
+        prompt_text, full_text = to_chat_example(tokenizer, example["prompt"], example["response"])
+        prompt_ids = tokenizer(prompt_text)["input_ids"]
+        full_ids = tokenizer(full_text)["input_ids"]
+        if full_ids[: len(prompt_ids)] == prompt_ids:
+            answer_ids = full_ids[len(prompt_ids):]
+        else:  # template tokenizes differently as a whole: tokenize the answer part alone
+            answer_ids = tokenizer(full_text[len(prompt_text):], add_special_tokens=False)["input_ids"]
+    else:
+        # Base model (e.g. Phi-2): prompt ends with "Answer:", the answer follows, then EOS.
+        prompt_ids = tokenizer(example["prompt"], add_special_tokens=False)["input_ids"]
+        answer_ids = tokenizer(" " + example["response"], add_special_tokens=False)["input_ids"]
+    if not answer_ids or answer_ids[-1] != tokenizer.eos_token_id:
+        answer_ids = answer_ids + [tokenizer.eos_token_id]
     if len(prompt_ids) + len(answer_ids) > max_length:
         return None  # rather than silently cutting off the answer or its EOS
     return {
@@ -124,27 +169,29 @@ def tokenize_example(example: dict, tokenizer, max_length: int) -> dict | None:
 def parse_args(argv=None):
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--data", default=str(Settings.from_env().data_path), help="Fund CSV (default: MF_DATA_PATH or data/)")
-    p.add_argument("--base-model", default="microsoft/phi-2")
-    p.add_argument("--output", default=str(DEFAULT_ADAPTER_OUTPUT),
-                   help="Where to save the LoRA adapter (default: artifacts/fine_tuned_phi2_v2, picked up automatically)")
+    p.add_argument("--base-model", default=Settings.from_env().base_model,
+                   help="Default: MF_BASE_MODEL or microsoft/Phi-3-mini-4k-instruct")
+    p.add_argument("--output", default=None,
+                   help="Where to save the adapter (default: artifacts/lora-<model>, picked up automatically)")
     p.add_argument("--epochs", type=float, default=2)
     p.add_argument("--lr", type=float, default=2e-4)
-    p.add_argument("--batch-size", type=int, default=4)
-    p.add_argument("--grad-accum", type=int, default=4)
+    p.add_argument("--batch-size", type=int, default=2, help="Per step; 2 fits Phi-3-mini on a 16 GB T4")
+    p.add_argument("--grad-accum", type=int, default=8, help="Steps per update (2 x 8 = 16 examples)")
     p.add_argument("--max-length", type=int, default=512)
     p.add_argument("--lora-r", type=int, default=16)
     p.add_argument("--lora-alpha", type=int, default=32)
     p.add_argument("--lora-dropout", type=float, default=0.05)
     p.add_argument(
-        "--target-modules", default="q_proj,k_proj,v_proj,dense",
-        help='Comma-separated module names (Phi-2 default) or "all-linear"',
+        "--target-modules", default="auto",
+        help='"auto" (by architecture; Phi-3: qkv_proj,o_proj), "all-linear", or comma-separated names',
     )
     p.add_argument("--examples-per-fund", type=int, default=3)
     p.add_argument("--mismatch-rate", type=float, default=0.15)
     p.add_argument("--eval-fraction", type=float, default=0.1)
     p.add_argument("--eval-generate", type=int, default=20, help="Held-out prompts to generate for the grounding check")
     p.add_argument("--max-funds", type=int, default=None, help="Use only N funds (smoke tests)")
-    p.add_argument("--gradient-checkpointing", action="store_true", help="Lower memory, slower")
+    p.add_argument("--gradient-checkpointing", action=argparse.BooleanOptionalAction, default=True,
+                   help="Recompute activations to save memory (default on; --no-gradient-checkpointing to disable)")
     p.add_argument("--save-jsonl", default=None, help="Also write the generated examples here")
     p.add_argument("--seed", type=int, default=42)
     return p.parse_args(argv)
@@ -152,6 +199,8 @@ def parse_args(argv=None):
 
 def main(argv=None) -> None:
     args = parse_args(argv)
+    args.output = args.output or str(default_adapter_dir(args.base_model))
+    print(f"Base model: {args.base_model}\nAdapter will be saved to: {args.output}")
 
     import torch
     import transformers
@@ -180,6 +229,7 @@ def main(argv=None) -> None:
     if tokenizer.pad_token is None:
         tokenizer.pad_token = tokenizer.eos_token  # safe now: padding is masked via labels=-100, EOS is not
     tokenizer.padding_side = "right"
+    print("Chat format:", "yes (prompts wrapped in the model's chat template)" if has_chat_template(tokenizer) else "no")
 
     def to_dataset(rows):
         tokenized = [t for t in (tokenize_example(r, tokenizer, args.max_length) for r in rows) if t]
@@ -191,22 +241,33 @@ def main(argv=None) -> None:
     train_ds, eval_ds = to_dataset(train_ex), to_dataset(eval_ex)
 
     cuda = torch.cuda.is_available()
-    bf16 = cuda and torch.cuda.is_bf16_supported()
+    # bfloat16 only on GPUs that run it natively (compute capability 8+: A100, L4, ...).
+    # torch.cuda.is_bf16_supported() also says True on a T4, where bfloat16 is only emulated
+    # and training ran about 8x slower (68 s per step on a T4); a T4 uses float16.
+    bf16 = cuda and torch.cuda.get_device_capability()[0] >= 8
     dtype = torch.bfloat16 if bf16 else (torch.float16 if cuda else torch.float32)
+    print(f"Precision: {str(dtype).replace('torch.', '')}" + (f" on {torch.cuda.get_device_name()}" if cuda else ""))
     dtype_kw = "dtype" if Version(transformers.__version__) >= Version("4.56") else "torch_dtype"
     model = AutoModelForCausalLM.from_pretrained(
         args.base_model, device_map="auto" if cuda else None, **{dtype_kw: dtype}
     )
     if args.gradient_checkpointing:
-        model.gradient_checkpointing_enable()
+        model.gradient_checkpointing_enable(gradient_checkpointing_kwargs={"use_reentrant": False})
         model.enable_input_require_grads()
+        model.config.use_cache = False  # incompatible with checkpointing during training
 
-    targets = args.target_modules
+    if args.target_modules == "auto":
+        targets = lora_target_modules(model.config.model_type)
+    elif args.target_modules == "all-linear":
+        targets = "all-linear"
+    else:
+        targets = [t.strip() for t in args.target_modules.split(",")]
+    print(f"LoRA layers ({model.config.model_type}): {targets}")
     lora = LoraConfig(
         r=args.lora_r,
         lora_alpha=args.lora_alpha,
         lora_dropout=args.lora_dropout,
-        target_modules=targets if targets == "all-linear" else [t.strip() for t in targets.split(",")],
+        target_modules=targets,
         bias="none",
         task_type=TaskType.CAUSAL_LM,
     )
@@ -259,15 +320,19 @@ def main(argv=None) -> None:
 
     # Grounding check on held-out funds: do generations only cite numbers from the facts?
     model.eval()
+    model.config.use_cache = True
     tokenizer.padding_side = "left"
     sample = eval_ex[: args.eval_generate]
+    fund_by_code = {int(f["scheme_code"]): f for f in funds}
     grounded, lengths, generations = 0, [], []
     for ex in sample:
-        enc = tokenizer(ex["prompt"], return_tensors="pt").to(model.device)
+        # Prompted exactly as the API prompts it (chat-wrapped for Phi-3-mini).
+        enc = tokenizer(to_chat_prompt(tokenizer, ex["prompt"]), return_tensors="pt").to(model.device)
         with torch.no_grad():
             gen = model.generate(**enc, max_new_tokens=120, do_sample=False, pad_token_id=tokenizer.pad_token_id)
         text = clean_generation(tokenizer.decode(gen[0][enc["input_ids"].shape[1]:], skip_special_tokens=True))
-        grounded += int(is_usable_explanation(text, {"prompt": ex["prompt"]}))
+        # The same quality gate the API applies, including the cost/returns contradiction check.
+        grounded += int(is_usable_explanation(text, {"prompt": ex["prompt"]}, fund_by_code[ex["scheme_code"]]))
         lengths.append(len(text.split()))
         generations.append(text)
     if sample:
@@ -277,7 +342,10 @@ def main(argv=None) -> None:
         )
         print(f"\nExample prompt:\n{sample[0]['prompt']}\nGenerated: {generations[0]}\nTarget: {sample[0]['response']}")
     (out / "training_metrics.json").write_text(
-        json.dumps({"eval_loss": metrics["eval_loss"], "grounded": grounded, "checked": len(sample)}, indent=2)
+        json.dumps(
+            {"base_model": args.base_model, "eval_loss": metrics["eval_loss"], "grounded": grounded, "checked": len(sample)},
+            indent=2,
+        )
     )
 
 

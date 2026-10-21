@@ -15,6 +15,30 @@
   margin: 0.35rem 0 0;
 }
 
+.source-tag {
+  display: inline-block;
+  margin-left: 0.6rem;
+  padding: 0.1rem 0.55rem;
+  border-radius: 999px;
+  font-size: 0.75rem;
+  font-weight: 600;
+  vertical-align: 0.1em;
+}
+
+.source-tag.llm {
+  background: #e6f4ea;
+  color: #1e6b3a;
+}
+
+.source-tag.template {
+  background: #e8eef7;
+  color: #1e4f91;
+}
+
+.nav-stale {
+  color: #8a5a00;
+}
+
 .chips {
   display: flex;
   flex-wrap: wrap;

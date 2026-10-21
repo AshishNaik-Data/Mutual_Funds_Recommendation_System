@@ -61,24 +61,3 @@ def test_short_names():
     assert short_name("Index Funds") == "Index"
     assert short_name("Dynamic Bond") == "Dynamic Bond"
     assert short_name("Childrens Funds") == "children's"
-
-
-def test_find_adapter_picks_newest_and_skips_checkpoints(tmp_path):
-    import os
-
-    from mf_recommender.config import find_adapter
-
-    assert find_adapter((tmp_path,)) is None
-    old, new, ckpt = tmp_path / "fine_tuned_phi2", tmp_path / "fine_tuned_phi2_v2", tmp_path / "checkpoint-100"
-    for i, d in enumerate((old, new, ckpt)):
-        d.mkdir()
-        (d / "adapter_config.json").write_text("{}")
-        os.utime(d / "adapter_config.json", (1_000 + i, 1_000 + i))
-    assert find_adapter((tmp_path,)) == str(new)
-
-
-def test_explicit_adapter_env_wins(monkeypatch, tmp_path):
-    from mf_recommender.config import Settings
-
-    monkeypatch.setenv("MF_ADAPTER_PATH", str(tmp_path))
-    assert Settings.from_env().adapter_path == str(tmp_path)

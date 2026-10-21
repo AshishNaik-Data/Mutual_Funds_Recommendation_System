@@ -35,6 +35,11 @@ _COLUMN_MAP = {"Scheme Codes": "scheme_code", "Sub_Category": "category", "NAV":
 _REQUIRED = {"scheme_name", "scheme_code", "category", "expense_ratio", "risk_level", *RETURN_COLUMNS}
 
 
+def risk_band_for_step(step: int) -> str:
+    """The UI risk choice (Low / Medium / High) that a riskometer step falls in."""
+    return next(name for name, (lo, hi) in RISK_BANDS.items() if lo <= int(step) <= hi)
+
+
 def normalize_risk_choice(risk: str | None) -> str | None:
     """Map user input like 'low' / 'MEDIUM' to a RISK_BANDS key (None means no filter)."""
     if risk is None or not str(risk).strip() or str(risk).strip().lower() == "any":

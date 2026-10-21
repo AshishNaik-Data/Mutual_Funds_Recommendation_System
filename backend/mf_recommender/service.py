@@ -5,12 +5,13 @@ from __future__ import annotations
 import logging
 import threading
 from dataclasses import dataclass, field
+from datetime import date
 from functools import lru_cache
 from typing import Any
 
 import pandas as pd
 from langchain_core.embeddings import Embeddings
-from langchain_core.language_models import BaseLanguageModel
+from langchain_core.runnables import Runnable
 
 from .chains import build_explain_chain, build_rewrite_chain
 from .config import Settings
@@ -30,6 +31,13 @@ class UnknownCategoryError(ValueError):
     pass
 
 
+def nav_age_days(nav_date: str | None, today: date | None = None) -> int | None:
+    try:
+        return ((today or date.today()) - date.fromisoformat(nav_date)).days if nav_date else None
+    except ValueError:
+        return None
+
+
 @dataclass
 class Recommendation:
     funds: list[dict]
@@ -44,7 +52,7 @@ class RecommenderService:
         settings: Settings,
         funds: pd.DataFrame,
         retriever: HybridFundRetriever,
-        llm: BaseLanguageModel | None = None,
+        llm: Runnable | None = None,
         nav_client: NavClient | None = None,
     ):
         self.settings = settings
@@ -66,7 +74,7 @@ class RecommenderService:
         settings: Settings,
         *,
         embeddings: Embeddings | None = None,
-        llm: BaseLanguageModel | None = _UNSET,
+        llm: Runnable | None = _UNSET,
         nav_client: NavClient | None = _UNSET,
     ) -> RecommenderService:
         funds = load_funds(settings.data_path)
@@ -108,8 +116,10 @@ class RecommenderService:
             return ""
         return "" if rewritten.strip().lower() == goal.strip().lower() else rewritten
 
-    def _explain(self, ranked_funds: list[dict], goal: str, horizon: float | None) -> list[dict[str, str]]:
-        inputs = [{"fund": f, "goal": goal, "horizon_years": horizon} for f in ranked_funds]
+    def _explain(
+        self, ranked_funds: list[dict], goal: str, horizon: float | None, risk: str | None = None
+    ) -> list[dict[str, str]]:
+        inputs = [{"fund": f, "goal": goal, "horizon_years": horizon, "risk": risk} for f in ranked_funds]
         if not inputs:
             return []
         if self.llm is None:
@@ -164,13 +174,18 @@ class RecommenderService:
         )
         for row in fund_rows:
             quote = live.get(row["scheme_code"])
-            row["nav_source"] = "live" if quote else ("dataset" if clean_number(row.get("nav")) else "unavailable")
-            row["nav_date"] = quote.date if quote else None
             if quote:
+                age = nav_age_days(quote.date)
+                row["nav_source"] = "stale" if age is not None and age > self.settings.nav_stale_days else "live"
                 row["nav"] = quote.nav
+            else:
+                row["nav_source"] = "dataset" if clean_number(row.get("nav")) else "unavailable"
+            row["nav_date"] = quote.date if quote else None
 
         explanations = (
-            self._explain(fund_rows, goal, horizon) if explain else [{"text": "", "source": "none"}] * len(fund_rows)
+            self._explain(fund_rows, goal, horizon, risk)
+            if explain
+            else [{"text": "", "source": "none"}] * len(fund_rows)
         )
 
         funds_out = []

@@ -11,8 +11,17 @@ function navText(fund) {
   if (fund.NAV === null || fund.NAV === undefined) return "n/a";
   const value = `₹${Number(fund.NAV).toFixed(2)}`;
   if (fund.nav_source === "live" && fund.nav_date) return `${value} (live, ${fund.nav_date})`;
+  if (fund.nav_source === "stale" && fund.nav_date) {
+    // No NAV published for weeks: the dataset's scheme code is probably a closed or merged plan.
+    return `${value} (last published ${fund.nav_date}; this plan may be closed or merged)`;
+  }
   return fund.nav_source === "dataset" ? `${value} (from dataset)` : value;
 }
+
+const SOURCE_TAGS = {
+  llm: ["AI-written", "Written by the language model and checked against the fund's figures"],
+  template: ["From fund data", "Built directly from the fund's figures"],
+};
 
 const SCORE_LABELS = [
   ["relevance", "Goal match"],
@@ -28,7 +37,10 @@ function FundCard({ fund }) {
     <div className="fund-card">
       <h3>{fund.scheme_name}</h3>
       {fund.category && <p className="fund-meta">{fund.category}</p>}
-      <p><strong>NAV:</strong> {navText(fund)}</p>
+      <p>
+        <strong>NAV:</strong>{" "}
+        <span className={fund.nav_source === "stale" ? "nav-stale" : undefined}>{navText(fund)}</span>
+      </p>
       <p>
         <strong>Returns:</strong> 1Y: {pct(fund.returns_1yr)}, 3Y: {pct(fund.returns_3yr)}, 5Y: {pct(fund.returns_5yr)}
       </p>
@@ -38,6 +50,14 @@ function FundCard({ fund }) {
       {fund.explanation && (
         <div className="explanation">
           <strong>Why this fund?</strong>
+          {SOURCE_TAGS[fund.explanation_source] && (
+            <span
+              className={`source-tag ${fund.explanation_source}`}
+              title={SOURCE_TAGS[fund.explanation_source][1]}
+            >
+              {SOURCE_TAGS[fund.explanation_source][0]}
+            </span>
+          )}
           <p>{fund.explanation}</p>
         </div>
       )}

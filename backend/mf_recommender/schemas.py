@@ -44,7 +44,9 @@ class FundRecommendation(BaseModel):
     category: str
     NAV: float | None
     nav_date: str | None
-    nav_source: Literal["live", "dataset", "unavailable"]
+    nav_source: Literal["live", "stale", "dataset", "unavailable"] = Field(
+        ..., description='"stale": the latest published NAV is old, so the plan may be closed or merged'
+    )
     returns_1yr: float | None
     returns_3yr: float | None
     returns_5yr: float | None
